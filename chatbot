@@ -1,0 +1,973 @@
+main#!/bin/bash
+
+# Color definitions
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[0;37m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+# Configuration variables
+CONFIG_DIR="$HOME/.shellbot"
+LOG_FILE="$CONFIG_DIR/chat_history.log"
+USER_DB="$CONFIG_DIR/users.db"
+KNOWLEDGE_BASE="$CONFIG_DIR/knowledge.txt"
+RESPONSES_FILE="$CONFIG_DIR/responses.txt"
+MAX_IDLE_TIME=300  # 5 minutes in seconds
+BOT_NAME="ShellBot"
+USER_NAME=""
+SESSION_ID=$(date +%s)
+WEATHER_CACHE="$CONFIG_DIR/weather_cache.txt"
+WEATHER_CACHE_TIME=3600  # Cache weather data for 1 hour
+
+setup_environment() {
+    echo -e "${CYAN}Setting up $BOT_NAME environment...${RESET}"
+   
+    if [ ! -d "$CONFIG_DIR" ]; then
+        mkdir -p "$CONFIG_DIR"
+        echo "Directory $CONFIG_DIR created."
+    fi
+   
+    # Initialize knowledge base if it doesn't exist
+    if [ ! -f "$KNOWLEDGE_BASE" ]; then
+        cat > "$KNOWLEDGE_BASE" << EOL
+What is your name?|My name is $BOT_NAME. I'm a shell script chatbot.
+Who created you?|I was created as a shell scripting project.
+What can you do?|I can chat with you, tell jokes, provide weather information, perform calculations, manage notes, and more!
+What time is it?|FUNC:show_time
+What date is it?|FUNC:show_date
+How are you?|I'm just a script, but I'm running well, thank you! How are you?
+Tell me a joke|FUNC:tell_joke
+
+Open Google|FUNC:open_google
+Launch Google|FUNC:open_google
+Open YouTube|FUNC:open_youtube
+Launch YouTube|FUNC:open_youtube
+EOL
+    fi
+   
+    # Initialize responses file if it doesn't exist
+    if [ ! -f "$RESPONSES_FILE" ]; then
+        cat > "$RESPONSES_FILE" << EOL
+I don't understand that question.
+I'm not sure how to respond to that.
+Could you rephrase your question?
+I'm still learning, so I don't have an answer for that yet.
+That's an interesting question, but I don't have a good answer.
+EOL
+    fi
+   
+    # Create dictionary file if it doesn't exist
+    if [ ! -f "$CONFIG_DIR/dictionary.txt" ]; then
+        cat > "$CONFIG_DIR/dictionary.txt" << EOL
+shell:A program that interprets commands and acts as an intermediary between the user and the operating system.
+linux:An open-source Unix-like operating system kernel.
+bash:Bourne Again SHell, a popular command-line interpreter for Unix-like systems.
+script:A file containing a sequence of commands to be executed by a program or scripting language interpreter.
+variable:A named storage location that may take different values.
+function:A block of organized, reusable code used to perform a single action.
+command:An instruction given by a user telling a computer to do something.
+directory:A file system cataloging structure which contains references to other files and directories.
+kernel:The core component of an operating system that manages system resources.
+terminal:A text-based interface used to interact with a computer.
+EOL
+    fi
+   
+    # Initialize reminder system
+    mkdir -p "$CONFIG_DIR/reminders"
+   
+    # Create folders for notes and todos
+    mkdir -p "$CONFIG_DIR/notes"
+    mkdir -p "$CONFIG_DIR/todos"
+   
+    touch "$LOG_FILE"
+    touch "$USER_DB"
+    touch "$WEATHER_CACHE"
+   
+    echo -e "${GREEN}Environment setup complete.${RESET}"
+}
+
+# Welcome message and get user name
+welcome() {
+    clear
+    echo -e "${BOLD}${BLUE}======================================${RESET}"
+    echo -e "${BOLD}${BLUE}  Welcome to $BOT_NAME v2.0${RESET}"
+    echo -e "${BOLD}${BLUE}  $(date)${RESET}"
+    echo -e "${BOLD}${BLUE}======================================${RESET}"
+    echo
+   
+    echo -ne "${YELLOW}Please enter your name: ${RESET}"
+    read USER_NAME
+   
+    # Check if user exists
+    if grep -q "^$USER_NAME:" "$USER_DB"; then
+        # Get user data
+        user_data=$(grep "^$USER_NAME:" "$USER_DB")
+        last_login=$(echo "$user_data" | cut -d: -f2)
+        login_count=$(echo "$user_data" | cut -d: -f3)
+       
+        # Update user entry
+        new_login_count=$((login_count + 1))
+        now=$(date +"%Y-%m-%d %H:%M:%S")
+        sed -i "s/^$USER_NAME:.*/$USER_NAME:$now:$new_login_count/" "$USER_DB"
+       
+        echo -e "${GREEN}Welcome back, $USER_NAME! Your last login was $last_login.${RESET}"
+        echo -e "${GREEN}This is login #$new_login_count.${RESET}"
+       
+        # Check for pending reminders
+        check_reminders
+    else
+        # Create new user
+        now=$(date +"%Y-%m-%d %H:%M:%S")
+        echo "$USER_NAME:$now:1" >> "$USER_DB"
+        echo -e "${GREEN}Hello $USER_NAME! It's nice to meet you.${RESET}"
+        echo -e "${GREEN}This is your first time chatting with me.${RESET}"
+       
+        # First-time user tutorial
+        echo -e "${CYAN}Let me show you a few things I can do:${RESET}"
+        echo -e "${CYAN}1. Answer questions${RESET}"
+        echo -e "${CYAN}2. Tell jokes${RESET}"
+        echo -e "${CYAN}3. Check the weather${RESET}"
+        echo -e "${CYAN}4. Perform calculations${RESET}"
+        echo -e "${CYAN}5. Manage your notes and todos${RESET}"
+        echo -e "${CYAN}Type 'help' anytime to see a full list of commands.${RESET}"
+    fi
+   
+    echo
+    echo -e "${MAGENTA}$BOT_NAME${RESET}: Hello $USER_NAME! How can I help you today?"
+}
+
+# Log the conversation
+log_conversation() {
+    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "[$timestamp] SESSION:$SESSION_ID USER:$USER_NAME QUERY:$1 RESPONSE:$2" >> "$LOG_FILE"
+}
+
+# Get a random response from the default responses
+get_random_response() {
+    local line_count=$(wc -l < "$RESPONSES_FILE")
+    local random_line=$((RANDOM % line_count + 1))
+    sed -n "${random_line}p" "$RESPONSES_FILE"
+}
+
+# Search knowledge base for answer
+search_knowledge_base() {
+    local query="$1"
+    local result=""
+   
+    # Convert to lowercase for case-insensitive matching
+    local query_lower=$(echo "$query" | tr '[:upper:]' '[:lower:]')
+   
+    # Search through knowledge base
+    while IFS='|' read -r pattern response; do
+        pattern_lower=$(echo "$pattern" | tr '[:upper:]' '[:lower:]')
+       
+        if [[ "$query_lower" == *"$pattern_lower"* ]]; then
+            # Check if response is a function call
+            if [[ "$response" == FUNC:* ]]; then
+                func_name=${response#FUNC:}
+                result=$($func_name)
+            else
+                result="$response"
+            fi
+            break
+        fi
+    done < "$KNOWLEDGE_BASE"
+   
+    echo "$result"
+}
+
+# Show current time
+show_time() {
+    date +"%T"
+}
+
+# Show current date
+show_date() {
+    date +"%A, %B %d, %Y"
+}
+
+search_web() {
+  local query="$1"
+  if [ -z "$query" ]; then
+    echo "Please provide something to search for. Example: search how to make pancakes"
+    return
+  fi
+
+  # URL encode the query
+  local encoded_query=$(echo "$query" | sed 's/ /%20/g')
+
+  echo "Searching Google for: $query"
+  xdg-open "https://www.google.com/search?q=$encoded_query" 2>/dev/null || \
+  start "" "https://www.google.com/search?q=$encoded_query" || \
+  open "https://www.google.com/search?q=$encoded_query"
+}
+
+
+# Tell a joke - more compatible version
+tell_joke() {
+    local joke_num=$((RANDOM % 10))
+   
+    case $joke_num in
+        0) echo "Why do programmers prefer dark mode? Because light attracts bugs!" ;;
+        1) echo "Why did the computer go to the doctor? Because it had a virus!" ;;
+        2) echo "How many programmers does it take to change a light bulb? None, that's a hardware problem!" ;;
+        3) echo "What's a shell's favorite type of music? Rock and Roll!" ;;
+        4) echo "Why don't scientists trust atoms? Because they make up everything!" ;;
+        5) echo "How does a penguin build its house? Igloos it together!" ;;
+        6) echo "What do you call a bash script that's spying on you? Shell shock!" ;;
+        7) echo "grep is so old, it's sed its awk!" ;;
+        8) echo "Why did the constant break up with the variable? Because the variable kept changing!" ;;
+        9) echo "There are 10 types of people in this world: those who understand binary, and those who don't." ;;
+    esac
+}
+
+# Check weather
+check_weather() {
+    local location="$1"
+    local now=$(date +%s)
+    local cached=false
+   
+    # Check if we have cached data
+    if [ -f "$WEATHER_CACHE" ]; then
+        local cache_location=$(head -n 1 "$WEATHER_CACHE" | cut -d'|' -f1)
+        local cache_time=$(head -n 1 "$WEATHER_CACHE" | cut -d'|' -f2)
+       
+        if [[ "$cache_location" == "$location" && $((now - cache_time)) -lt $WEATHER_CACHE_TIME ]]; then
+            tail -n +2 "$WEATHER_CACHE"
+            cached=true
+        fi
+    fi
+   
+    if [ "$cached" = false ]; then
+        echo "I would fetch weather data for $location here."
+        echo "In a real implementation, this would make an API call to a weather service."
+        echo "For this demo, let's simulate weather data:"
+       
+        # More robust implementation without array
+        local temp
+        local condition
+       
+        # Generate random temperature between 32 and 95
+        temp=$((RANDOM % 64 + 32))
+       
+        # Select random condition
+        local condition_num=$((RANDOM % 7))
+        case $condition_num in
+            0) condition="Sunny" ;;
+            1) condition="Partly Cloudy" ;;
+            2) condition="Cloudy" ;;
+            3) condition="Rainy" ;;
+            4) condition="Overcast" ;;
+            5) condition="Clear" ;;
+            6) condition="Stormy" ;;
+        esac
+       
+        local result="Current weather in $location: $temp°F and $condition"
+       
+        # Cache the result
+        echo "$location|$now" > "$WEATHER_CACHE"
+        echo "$result" >> "$WEATHER_CACHE"
+       
+        echo "$result"
+    fi
+}
+
+# Calculate expression
+calculate() {
+    local expression="$1"
+   
+    # Check for unsafe expressions
+    if [[ "$expression" == *"rm"* || "$expression" == *">"* || "$expression" == *">>"* ||
+          "$expression" == *"<"* || "$expression" == *"|"* || "$expression" == *";"* ]]; then
+        echo "Sorry, I cannot evaluate potentially unsafe expressions."
+        return
+    fi
+   
+    # Try to evaluate the expression
+    result=$(echo "scale=4; $expression" | bc 2>&1)
+   
+    if [ $? -eq 0 ]; then
+        echo "Result: $result"
+    else
+        echo "Sorry, I couldn't evaluate that expression. Please check the syntax."
+    fi
+}
+
+# Note management system
+
+open_google() {
+  echo "Opening Google in your default browser..."
+  xdg-open "https://www.google.com" 2>/dev/null || start "" "https://www.google.com" || open "https://www.google.com"
+}
+
+open_youtube() {
+  echo "Opening YouTube in your default browser..."
+  xdg-open "https://www.youtube.com" 2>/dev/null || start "" "https://www.youtube.com" || open "https://www.youtube.com"
+}
+
+
+note_manager() {
+    local cmd="$1"
+    local note_content="$2"
+    local notes_dir="$CONFIG_DIR/notes"
+    local notes_file="$notes_dir/${USER_NAME}_notes.txt"
+   
+    # Create notes directory if it doesn't exist
+    if [ ! -d "$notes_dir" ]; then
+        mkdir -p "$notes_dir"
+    fi
+   
+    case "$cmd" in
+        "add")
+            echo "$(date +"%Y-%m-%d %H:%M:%S") - $note_content" >> "$notes_file"
+            echo "Note added successfully!"
+            ;;
+        "list")
+            if [ -f "$notes_file" ]; then
+                echo "Your notes:"
+                cat -n "$notes_file"
+            else
+                echo "You don't have any notes yet."
+            fi
+            ;;
+        "delete")
+            if [ -f "$notes_file" ]; then
+                local note_number="$note_content"
+                if [[ "$note_number" =~ ^[0-9]+$ ]]; then
+                    local total_notes=$(wc -l < "$notes_file")
+                    if [ "$note_number" -gt 0 ] && [ "$note_number" -le "$total_notes" ]; then
+                        sed -i "${note_number}d" "$notes_file"
+                        echo "Note #$note_number deleted."
+                    else
+                        echo "Invalid note number. Please use 'note list' to see available notes."
+                    fi
+                else
+                    echo "Please provide a valid note number."
+                fi
+            else
+                echo "You don't have any notes yet."
+            fi
+            ;;
+        "clear")
+            if [ -f "$notes_file" ]; then
+                echo -n > "$notes_file"
+                echo "All notes cleared."
+            else
+                echo "You don't have any notes yet."
+            fi
+            ;;
+        *)
+            echo "Available note commands: add, list, delete, clear"
+            echo "Examples:"
+            echo "  note add Buy milk"
+            echo "  note list"
+            echo "  note delete 3"
+            echo "  note clear"
+            ;;
+    esac
+}
+
+# Todo management system
+todo_manager() {
+    local cmd="$1"
+    local todo_content="$2"
+    local todo_file="$CONFIG_DIR/todos/${USER_NAME}_todos.txt"
+    local todo_dir="$CONFIG_DIR/todos"
+   
+    # Create todos directory if it doesn't exist
+    if [ ! -d "$todo_dir" ]; then
+        mkdir -p "$todo_dir"
+    fi
+   
+    case "$cmd" in
+        "add")
+            echo "[ ] $(date +"%Y-%m-%d") - $todo_content" >> "$todo_file"
+            echo "Todo added to your list!"
+            ;;
+        "list")
+            if [ -f "$todo_file" ]; then
+                echo "Your todo list:"
+                cat -n "$todo_file"
+            else
+                echo "Your todo list is empty."
+            fi
+            ;;
+        "done")
+            if [ -f "$todo_file" ]; then
+                local task_number="$todo_content"
+                if [[ "$task_number" =~ ^[0-9]+$ ]]; then
+                    sed -i "${task_number}s/\[ \]/\[x\]/" "$todo_file"
+                    echo "Task #$task_number marked as completed!"
+                else
+                    echo "Please provide a valid task number."
+                fi
+            else
+                echo "Your todo list is empty."
+            fi
+            ;;
+        "clear")
+            if [ -f "$todo_file" ]; then
+                echo -n > "$todo_file"
+                echo "All todos cleared."
+            else
+                echo "Your todo list is empty."
+            fi
+            ;;
+        *)
+            echo "Available todo commands: add, list, done, clear"
+            echo "Examples:"
+            echo "  todo add Call the dentist"
+            echo "  todo list"
+            echo "  todo done 2"
+            echo "  todo clear"
+            ;;
+    esac
+}
+
+# Dictionary function
+dictionary_lookup() {
+    local word="$1"
+    local dict_file="$CONFIG_DIR/dictionary.txt"
+   
+    # Look up the word
+    local definition=$(grep -i "^$word:" "$dict_file" | cut -d':' -f2-)
+   
+    if [ -n "$definition" ]; then
+        echo "Definition of '$word': $definition"
+    else
+        echo "Sorry, I don't have a definition for '$word' in my dictionary."
+        echo "You can add it with 'dict add $word [definition]'"
+    fi
+}
+
+# Add a word to the dictionary
+dictionary_add() {
+    local word="$1"
+    local definition="$2"
+    local dict_file="$CONFIG_DIR/dictionary.txt"
+   
+    # Check if word already exists
+    if grep -q -i "^$word:" "$dict_file"; then
+        echo "This word is already in the dictionary. Use 'dict update' to modify it."
+    else
+        echo "$word:$definition" >> "$dict_file"
+        echo "Added '$word' to the dictionary."
+    fi
+}
+
+
+# System information
+system_info() {
+    echo "System Information:"
+    echo "-------------------"
+    echo "Date: $(date)"
+    echo "Hostname: $(hostname)"
+    echo "Kernel: $(uname -r)"
+    echo "Uptime: $(uptime -p)"
+   
+    # More robust CPU info that works on more systems
+    if [ -f "/proc/cpuinfo" ]; then
+        echo "CPU: $(grep "model name" /proc/cpuinfo | head -n 1 | cut -d':' -f2 | sed 's/^ *//')"
+    else
+        echo "CPU: $(uname -p)"
+    fi
+   
+    # More robust memory info
+    if command -v free >/dev/null 2>&1; then
+        echo "Memory: $(free -h | grep Mem | awk '{print $2}') total, $(free -h | grep Mem | awk '{print $7}') available"
+    else
+        echo "Memory: $(vm_stat | grep "Pages free" | awk '{print $3}' | sed 's/\.//')" # MacOS alternative
+    fi
+   
+    # More robust disk info
+    if command -v df >/dev/null 2>&1; then
+        echo "Disk: $(df -h / | tail -n 1 | awk '{print $2}') total, $(df -h / | tail -n 1 | awk '{print $4}') available"
+    fi
+   
+    echo "User: $(whoami)"
+    echo "Shell: $SHELL"
+}
+
+# File search function
+file_search() {
+    local search_term="$1"
+    local search_path="${2:-$HOME}"
+   
+    echo "Searching for files containing '$search_term' in $search_path..."
+    if [ -d "$search_path" ]; then
+        find "$search_path" -type f -name "*$search_term*" 2>/dev/null | head -n 10
+    else
+        echo "The specified path does not exist."
+    fi
+}
+
+# Word count function
+count_words() {
+    local text="$1"
+   
+    # Count words, characters, and lines
+    local word_count=$(echo "$text" | wc -w)
+    local char_count=$(echo "$text" | wc -c)
+    local line_count=$(echo "$text" | wc -l)
+   
+    echo "Word count: $word_count"
+    echo "Character count: $char_count"
+    echo "Line count: $line_count"
+}
+
+# Set reminder function
+set_reminder() {
+    local time="$1"
+    local message="$2"
+    local reminder_file="$CONFIG_DIR/reminders/${USER_NAME}_reminders.txt"
+   
+    # Validate time format (HH:MM)
+    if ! [[ "$time" =~ ^[0-9]{1,2}:[0-9]{2}$ ]]; then
+        echo "Please use a valid time format (HH:MM)."
+        return
+    fi
+   
+    # Add reminder to file
+    echo "$time|$message" >> "$reminder_file"
+    echo "Reminder set for $time: $message"
+}
+
+# Check reminders
+check_reminders() {
+    local reminder_file="$CONFIG_DIR/reminders/${USER_NAME}_reminders.txt"
+    local current_time=$(date +"%H:%M")
+   
+    if [ -f "$reminder_file" ]; then
+        local reminders_found=false
+       
+        while IFS='|' read -r time message; do
+            # Convert times to minutes for easier comparison
+            current_minutes=$((10#${current_time%:*} * 60 + 10#${current_time#*:}))
+            reminder_minutes=$((10#${time%:*} * 60 + 10#${time#*:}))
+           
+            # Check if reminder time is in the past but within 60 minutes
+            time_diff=$((current_minutes - reminder_minutes))
+            if [ $time_diff -ge 0 ] && [ $time_diff -le 60 ]; then
+                echo -e "${YELLOW}REMINDER: $message (scheduled for $time)${RESET}"
+                reminders_found=true
+            fi
+        done < "$reminder_file"
+       
+        # No need to show message if no reminders found
+        if [ "$reminders_found" = false ]; then
+            return
+        fi
+    fi
+}
+
+# Random password generator
+generate_password() {
+    local length="${1:-12}"
+   
+    # Validate length
+    if ! [[ "$length" =~ ^[0-9]+$ ]] || [ "$length" -lt 8 ] || [ "$length" -gt 32 ]; then
+        echo "Password length must be a number between 8 and 32."
+        return
+    fi
+   
+    # Generate password using /dev/urandom
+    if command -v base64 >/dev/null 2>&1; then
+        password=$(head -c 100 /dev/urandom | LC_ALL=C tr -dc 'a-zA-Z0-9!@#$%^&*()_+' | head -c "$length")
+        echo "Generated password: $password"
+    else
+        # Fallback method if base64 is not available
+        chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()"
+        password=""
+        for i in $(seq 1 "$length"); do
+            pos=$((RANDOM % ${#chars}))
+            password="${password}${chars:$pos:1}"
+        done
+        echo "Generated password: $password"
+    fi
+}
+
+# URL encoder
+url_encode() {
+    local string="$1"
+    local encoded=""
+    local i
+   
+    for ((i=0; i<${#string}; i++)); do
+        local c="${string:i:1}"
+        case "$c" in
+            [a-zA-Z0-9.~_-]) encoded="$encoded$c" ;;
+            *) encoded="$encoded$(printf '%%%02X' "'$c")" ;;
+        esac
+    done
+   
+    echo "Encoded URL: $encoded"
+}
+
+# URL decoder
+url_decode() {
+    local encoded="$1"
+   
+    # Use printf to decode URL encoded characters
+    printf "Decoded URL: $(echo -e "$(echo "$encoded" | sed 's/%/\\x/g')")\n"
+}
+
+# Show help message
+show_help() {
+    echo -e "${CYAN}$BOT_NAME Commands:${RESET}"
+    echo -e "${GREEN}help${RESET} - Show this help message"
+    echo -e "${GREEN}exit/quit/bye${RESET} - End the conversation"
+    echo -e "${GREEN}weather [location]${RESET} - Get weather information"
+    echo -e "${GREEN}calc [expression]${RESET} - Calculate a mathematical expression"
+    echo -e "${GREEN}time${RESET} - Show current time"
+    echo -e "${GREEN}date${RESET} - Show current date"
+    echo -e "${GREEN}joke${RESET} - Tell a joke"
+    echo -e "${GREEN}note add [text]${RESET} - Add a new note"
+    echo -e "${GREEN}note list${RESET} - List all your notes"
+    echo -e "${GREEN}note delete [number]${RESET} - Delete a note by number"
+    echo -e "${GREEN}note clear${RESET} - Delete all notes"
+    echo -e "${GREEN}todo add [text]${RESET} - Add a new todo item"
+    echo -e "${GREEN}todo list${RESET} - List all your todos"
+    echo -e "${GREEN}todo done [number]${RESET} - Mark a todo as completed"
+    echo -e "${GREEN}todo clear${RESET} - Clear all todo items"
+    echo -e "${GREEN}define [word]${RESET} - Look up a word definition"
+    echo -e "${GREEN}dict add [word] [definition]${RESET} - Add a word to dictionary"
+    echo -e "${GREEN}sysinfo${RESET} - Display system information"
+    echo -e "${GREEN}find [term] [path]${RESET} - Search for files"
+    echo -e "${GREEN}count [text]${RESET} - Count words in text"
+    echo -e "${GREEN}remind [HH:MM] [message]${RESET} - Set a reminder"
+    echo -e "${GREEN}password [length]${RESET} - Generate a random password"
+    echo -e "${GREEN}encode [text]${RESET} - URL encode text"
+    echo -e "${GREEN}decode [text]${RESET} - URL decode text"
+    echo -e "${GREEN}history${RESET} - Show your conversation history"
+    echo -e "${GREEN}clear${RESET} - Clear the screen"
+}
+
+# Show conversation history
+show_history() {
+    local history_entries=20  # Default number of entries to show
+   
+    if [[ "$1" =~ ^[0-9]+$ ]]; then
+        history_entries=$1
+    fi
+   
+    echo -e "${CYAN}Last $history_entries conversation entries:${RESET}"
+    grep "SESSION:$SESSION_ID USER:$USER_NAME" "$LOG_FILE" | tail -n "$history_entries" | while IFS= read -r line; do
+        local timestamp=$(echo "$line" | cut -d']' -f1 | cut -d'[' -f2)
+        local query=$(echo "$line" | sed -E 's/.*QUERY:([^[:space:]]+) RESPONSE:.*/\1/')
+        local response=$(echo "$line" | sed -E 's/.*RESPONSE:([^[:space:]]+).*/\1/')
+       
+        echo -e "${YELLOW}[$timestamp] You:${RESET} $query"
+        echo -e "${MAGENTA}$BOT_NAME:${RESET} $response"
+        echo
+    done
+}
+
+# Add new knowledge
+add_knowledge() {
+    local pattern="$1"
+    local response="$2"
+   
+    # Check if both pattern and response are provided
+    if [ -z "$pattern" ] || [ -z "$response" ]; then
+        echo "Usage: learn [pattern] [response]"
+        echo "Example: learn 'What is the capital of France?' 'The capital of France is Paris.'"
+        return
+    fi
+   
+    # Check if pattern already exists
+    if grep -q "^$pattern|" "$KNOWLEDGE_BASE"; then
+        echo "I already know about that. Use 'update' to change my response."
+    else
+        echo "$pattern|$response" >> "$KNOWLEDGE_BASE"
+        echo "Thank you! I've learned something new."
+    fi
+}
+
+# Update existing knowledge
+update_knowledge() {
+    local pattern="$1"
+    local response="$2"
+   
+    # Check if both pattern and response are provided
+    if [ -z "$pattern" ] || [ -z "$response" ]; then
+        echo "Usage: update [pattern] [response]"
+        return
+    fi
+   
+    # Check if pattern exists
+    if grep -q "^$pattern|" "$KNOWLEDGE_BASE"; then
+        sed -i "s|^$pattern|.*|$pattern|$response|" "$KNOWLEDGE_BASE"
+        echo "Knowledge updated successfully."
+    else
+        echo "I don't have that pattern in my knowledge base. Use 'learn' to add new knowledge."
+    fi
+}
+
+# Text analytics
+analyze_text() {
+    local text="$1"
+   
+    if [ -z "$text" ]; then
+        echo "Please provide some text to analyze."
+        return
+    fi
+   
+    echo "Text Analysis:"
+    echo "--------------"
+   
+    # Count words
+    local word_count=$(echo "$text" | wc -w)
+    echo "Word count: $word_count"
+   
+    # Count characters
+    local char_count=$(echo -n "$text" | wc -c)
+    echo "Character count: $char_count"
+   
+    # Count sentences (simple approximation)
+    local sentence_count=$(echo "$text" | grep -o '[.!?]' | wc -l)
+    echo "Approximate sentence count: $sentence_count"
+   
+    # Calculate average word length
+    local word_length=$(echo -n "$text" | tr -d '[:space:][:punct:]' | wc -c)
+    local avg_word_length=$(echo "scale=2; $word_length / $word_count" | bc)
+    echo "Average word length: $avg_word_length characters"
+   
+    # Find most common words (top 5)
+    echo "Most common words:"
+    echo "$text" | tr '[:upper:]' '[:lower:]' | tr -d '[:punct:]' | tr ' ' '\n' | sort | uniq -c | sort -nr | head -5 | sed 's/^[ \t]*//'
+}
+
+# MOTD - Message of the Day generator
+show_motd() {
+    local motd_quotes=(
+        "The only way to learn a new programming language is by writing programs in it. - Dennis Ritchie"
+        "The best error message is the one that never shows up. - Thomas Fuchs"
+        "First, solve the problem. Then, write the code. - John Johnson"
+        "Programming isn't about what you know; it's about what you can figure out. - Chris Pine"
+        "The most disastrous thing that you can ever learn is your first programming language. - Alan Kay"
+        "The function of good software is to make the complex appear to be simple. - Grady Booch"
+        "Any fool can write code that a computer can understand. Good programmers write code that humans can understand. - Martin Fowler"
+        "Programming today is a race between software engineers striving to build bigger and better idiot-proof programs, and the Universe trying to produce bigger and better idiots. So far, the Universe is winning. - Rick Cook"
+        "Always code as if the guy who ends up maintaining your code will be a violent psychopath who knows where you live. - John Woods"
+        "If debugging is the process of removing bugs, then programming must be the process of putting them in. - Edsger W. Dijkstra"
+    )
+   
+    local quote_index=$((RANDOM % 10))
+    local quote="${motd_quotes[$quote_index]}"
+   
+    echo -e "${CYAN}Quote of the day:${RESET}"
+    echo -e "${YELLOW}\"$quote\"${RESET}"
+}
+
+# Command-line interface processor
+process_command() {
+    local input="$1"
+    local response=""
+   
+    # Split input into command and arguments
+    local cmd=$(echo "$input" | cut -d' ' -f1)
+    local args=$(echo "$input" | cut -d' ' -f2-)
+   
+    case "$cmd" in
+        "help")
+            show_help
+            ;;
+"google")
+       open_google
+       ;;
+"youtube")
+       open_youtube
+       ;;
+"search")
+            response=$(search_web "$args")
+            ;;
+        "exit"|"quit"|"bye")
+            echo "Thank you for chatting with me, $USER_NAME! Have a great day!"
+            exit 0
+            ;;
+        "weather")
+            if [ -z "$args" ]; then
+                response="Please specify a location, e.g., 'weather New York'"
+            else
+                response=$(check_weather "$args")
+            fi
+            ;;
+        "calc"|"calculate")
+            if [ -z "$args" ]; then
+                response="Please specify an expression to calculate, e.g., 'calc 2+2'"
+            else
+                response=$(calculate "$args")
+            fi
+            ;;
+        "time")
+            response=$(show_time)
+            ;;
+        "date")
+            response=$(show_date)
+            ;;
+        "joke")
+            response=$(tell_joke)
+            ;;
+        "note")
+            local note_cmd=$(echo "$args" | cut -d' ' -f1)
+            local note_content=$(echo "$args" | cut -d' ' -f2-)
+            response=$(note_manager "$note_cmd" "$note_content")
+            ;;
+        "todo")
+            local todo_cmd=$(echo "$args" | cut -d' ' -f1)
+            local todo_content=$(echo "$args" | cut -d' ' -f2-)
+            response=$(todo_manager "$todo_cmd" "$todo_content")
+            ;;
+        "define"|"dict")
+            if [ "$cmd" = "define" ]; then
+                response=$(dictionary_lookup "$args")
+            else
+                local dict_cmd=$(echo "$args" | cut -d' ' -f1)
+                local dict_word=$(echo "$args" | cut -d' ' -f2)
+                local dict_def=$(echo "$args" | cut -d' ' -f3-)
+               
+                if [ "$dict_cmd" = "add" ]; then
+                    response=$(dictionary_add "$dict_word" "$dict_def")
+                else
+                    response=$(dictionary_lookup "$dict_cmd")
+                fi
+            fi
+            ;;
+        "sysinfo")
+            response=$(system_info)
+            ;;
+        "find")
+            local search_term=$(echo "$args" | cut -d' ' -f1)
+            local search_path=$(echo "$args" | cut -d' ' -f2)
+            response=$(file_search "$search_term" "$search_path")
+            ;;
+        "count")
+            response=$(count_words "$args")
+            ;;
+        "remind")
+            local remind_time=$(echo "$args" | cut -d' ' -f1)
+            local remind_msg=$(echo "$args" | cut -d' ' -f2-)
+            response=$(set_reminder "$remind_time" "$remind_msg")
+            ;;
+        "check")
+            if [ "$args" = "reminders" ]; then
+                response=$(check_reminders)
+            else
+                response="Sorry, I don't understand what you want me to check."
+            fi
+            ;;
+        "password")
+            response=$(generate_password "$args")
+            ;;
+        "encode")
+            response=$(url_encode "$args")
+            ;;
+        "decode")
+            response=$(url_decode "$args")
+            ;;
+        "history")
+            local history_count=$(echo "$args" | cut -d' ' -f1)
+            show_history "$history_count"
+            response="History displayed above."
+            ;;
+        "learn")
+            local pattern=$(echo "$args" | cut -d'|' -f1)
+            local learn_response=$(echo "$args" | cut -d'|' -f2)
+            response=$(add_knowledge "$pattern" "$learn_response")
+            ;;
+        "update")
+            local pattern=$(echo "$args" | cut -d'|' -f1)
+            local update_response=$(echo "$args" | cut -d'|' -f2)
+            response=$(update_knowledge "$pattern" "$update_response")
+            ;;
+        "analyze")
+            response=$(analyze_text "$args")
+            ;;
+        "motd")
+            response=$(show_motd)
+            ;;
+        "clear")
+            clear
+            response="Screen cleared."
+            ;;
+        *)
+            # Search knowledge base for answers
+            response=$(search_knowledge_base "$input")
+           
+            # If no response found, get a random default response
+            if [ -z "$response" ]; then
+                response=$(get_random_response)
+            fi
+            ;;
+    esac
+   
+    echo "$response"
+}
+
+# Main function
+main() {
+    # Set up the environment
+    setup_environment
+   
+    # Welcome message
+    welcome
+   
+    # Set up signal trap for clean exit
+    trap "echo -e '\nThank you for chatting with me, $USER_NAME! Goodbye!'; exit 0" SIGINT SIGTERM
+   
+    # Idle timer
+    last_activity_time=$(date +%s)
+   
+    # Main conversation loop
+    while true; do
+        # Check for long idle time
+        current_time=$(date +%s)
+        idle_time=$((current_time - last_activity_time))
+       
+        if [ $idle_time -ge $MAX_IDLE_TIME ]; then
+            echo -e "\n${YELLOW}You've been idle for a while. Are you still there? (yes/no)${RESET}"
+            read -t 30 still_there
+           
+            if [ "$still_there" = "no" ] || [ -z "$still_there" ]; then
+                echo -e "${GREEN}Thanks for chatting! Session ended due to inactivity. Goodbye!${RESET}"
+                exit 0
+            else
+                last_activity_time=$(date +%s)
+            fi
+        fi
+       
+        # Get user input
+        echo -ne "${YELLOW}You${RESET}: "
+        read -e input
+       
+        # Update last activity time
+        last_activity_time=$(date +%s)
+       
+        # Skip empty input
+        if [ -z "$input" ]; then
+            continue
+        fi
+       
+        # Process the command
+        response=$(process_command "$input")
+       
+        # Display the response
+        echo -e "${MAGENTA}$BOT_NAME${RESET}: $response"
+       
+        # Log the conversation
+        log_conversation "$input" "$response"
+       
+        # Check reminders periodically
+        if [ $((RANDOM % 10)) -eq 0 ]; then
+            check_reminders
+        fi
+    done
+}
+
+# Run the main function
+main
